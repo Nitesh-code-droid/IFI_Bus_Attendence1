@@ -3,6 +3,7 @@ import { useFocusEffect } from 'expo-router';
 import * as ScreenOrientation from 'expo-screen-orientation';
 import React, { useEffect, useState } from 'react';
 import {
+  ActivityIndicator,
   Alert,
   Dimensions,
   StyleSheet,
@@ -14,6 +15,27 @@ import {
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const SCAN_FRAME_SIZE = SCREEN_WIDTH * 0.7;
 
+// API Configuration - YOU NEED TO UPDATE THESE VALUES
+const API_CONFIG = {
+  // For development (testing on same network as your computer)
+  DEV_API_URL: 'http://192.168.0.107:3000/api/scan',
+  
+  // For production (when deployed to a server)
+  PROD_API_URL: 'https://192.168.2.4/api/scan',
+  
+  // Set to true when testing on physical device with local backend
+  // Set to false when using production backend
+  IS_DEVELOPMENT: false,
+  
+  // Optional: Add API key for security (if your backend requires it)
+  API_KEY: 'your-api-key-here', // Optional - only if backend needs authentication
+};
+
+// Helper function to get API URL based on environment
+const getApiUrl = () => {
+  return API_CONFIG.IS_DEVELOPMENT ? API_CONFIG.DEV_API_URL : API_CONFIG.PROD_API_URL;
+};
+
 export default function BarcodeScannerScreen() {
   const [permission, requestPermission] = useCameraPermissions();
   const [scanned, setScanned] = useState(false);
@@ -21,6 +43,8 @@ export default function BarcodeScannerScreen() {
   const [scanTime, setScanTime] = useState<string>('');
   const [facing, setFacing] = useState<CameraType>('back');
   const [isActive, setIsActive] = useState(true);
+  const [isSending, setIsSending] = useState(false); // New state for sending data
+  const [lastScanStatus, setLastScanStatus] = useState<'success' | 'error' | null>(null);
 
   // Lock screen orientation to portrait
   useEffect(() => {
@@ -41,8 +65,69 @@ export default function BarcodeScannerScreen() {
     }, [])
   );
 
-  const handleBarCodeScanned = ({ type, data }: BarcodeScanningResult) => {
-    if (!scanned) {
+  const sendScanToServer = async (employeeId: string, scanDateTime: string, scanType: string) => {
+    setIsSending(true);
+    setLastScanStatus(null);
+    
+    try {
+      const apiUrl = getApiUrl();
+      
+      console.log('Sending scan to:', apiUrl);
+      
+      // Prepare headers with proper typing
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json'
+      };
+      
+      // Add API key header if configured and not using default value
+      if (API_CONFIG.API_KEY && API_CONFIG.API_KEY !== 'your-api-key-here') {
+        headers['Authorization'] = `Bearer ${API_CONFIG.API_KEY}`;
+      }
+      
+      const response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: headers,
+        body: JSON.stringify({
+          employeeId,
+          scanDateTime,
+          scanType,
+          deviceInfo: 'Expo-Mobile-Scanner',
+        }),
+      });
+
+      const result = await response.json();
+      
+      if (response.ok) {
+        console.log('Scan sent successfully:', result);
+        setLastScanStatus('success');
+        return { success: true, message: result.message || 'Scan recorded successfully' };
+      } else {
+        console.error('Server error:', result);
+        setLastScanStatus('error');
+        return { 
+          success: false, 
+          message: result.message || `Server error: ${response.status}` 
+        };
+      }
+    } catch (error: any) {
+      console.error('Network error:', error);
+      setLastScanStatus('error');
+      
+      // Provide user-friendly error messages
+      let errorMessage = 'Network error. Please check your connection.';
+      
+      if (error.message?.includes('Network request failed')) {
+        errorMessage = 'Cannot connect to server. Check if backend is running and accessible.';
+      }
+      
+      return { success: false, message: errorMessage };
+    } finally {
+      setIsSending(false);
+    }
+  };
+
+  const handleBarCodeScanned = async ({ type, data }: BarcodeScanningResult) => {
+    if (!scanned && !isSending) {
       setScanned(true);
       setScannedData(data);
       
@@ -56,33 +141,94 @@ export default function BarcodeScannerScreen() {
         minute: '2-digit',
         second: '2-digit',
       });
+      const isoTime = now.toISOString(); // For database
+      
       setScanTime(formattedTime);
       
-      // Show alert with scan details
+      // Show initial alert
       Alert.alert(
         'Barcode Scanned!',
-        `Type: ${type}\nData: ${data}\n\nTime: ${formattedTime}\n\nData will be sent to server when backend is implemented.`,
-        [
-          { text: 'OK', onPress: () => console.log('OK Pressed') },
-          { 
-            text: 'Scan Again', 
-            onPress: () => resetScanner(),
-            style: 'default'
-          }
-        ]
+        `Employee ID: ${data}\n\nSending to server...`,
+        [{ text: 'OK', onPress: () => {} }]
       );
+      
+      // Send data to server
+      const result = await sendScanToServer(data, isoTime, type);
+      
+      // Show result alert with proper button typing
+      if (result.success) {
+        Alert.alert(
+          'Success!',
+          `Scan recorded successfully!\n\nEmployee: ${data}\nTime: ${formattedTime}`,
+          [
+            { 
+              text: 'Scan Again', 
+              onPress: () => resetScanner(),
+              style: 'default' as const
+            }
+          ]
+        );
+      } else {
+        Alert.alert(
+          'Upload Failed',
+          `Failed to send scan data.\n\nError: ${result.message}\n\nEmployee: ${data}\nTime: ${formattedTime}`,
+          [
+            { 
+              text: 'Scan Again', 
+              onPress: () => resetScanner(),
+              style: 'default' as const
+            },
+            {
+              text: 'Retry Send',
+              onPress: () => retrySend(data, isoTime, type),
+              style: 'cancel' as const
+            }
+          ]
+        );
+      }
     }
+  };
+
+  const retrySend = async (employeeId: string, scanDateTime: string, scanType: string) => {
+    const result = await sendScanToServer(employeeId, scanDateTime, scanType);
+    
+    Alert.alert(
+      result.success ? 'Retry Success!' : 'Retry Failed',
+      result.message,
+      [
+        { 
+          text: 'OK', 
+          onPress: () => resetScanner(),
+        }
+      ]
+    );
   };
 
   const resetScanner = () => {
     setScanned(false);
     setScannedData('');
     setScanTime('');
+    setLastScanStatus(null);
   };
 
   const toggleCameraFacing = () => {
     setFacing(current => (current === 'back' ? 'front' : 'back'));
   };
+
+  // Get computer IP for development (you need to fill this in)
+  const getComputerIP = () => {
+    // You need to find your computer's IP address manually
+    // Run `ipconfig` in Windows CMD and look for "IPv4 Address"
+    return '192.168.1.100'; // REPLACE WITH YOUR ACTUAL IP
+  };
+
+  // Update DEV_API_URL with actual IP on component mount
+  useEffect(() => {
+    if (API_CONFIG.IS_DEVELOPMENT) {
+      // In a real app, you might want to make this configurable
+      // For now, you'll need to manually update the IP above
+    }
+  }, []);
 
   if (!permission) {
     return (
@@ -118,7 +264,7 @@ export default function BarcodeScannerScreen() {
       <CameraView
         style={styles.camera}
         facing={facing}
-        onBarcodeScanned={scanned ? undefined : handleBarCodeScanned}
+        onBarcodeScanned={scanned || isSending ? undefined : handleBarCodeScanned}
         barcodeScannerSettings={{
           barcodeTypes: [
             'qr',
@@ -150,6 +296,14 @@ export default function BarcodeScannerScreen() {
               Position ID card barcode within the frame
             </Text>
           </View>
+
+          {/* Loading indicator when sending data */}
+          {isSending && (
+            <View style={styles.loadingOverlay}>
+              <ActivityIndicator size="large" color="#007AFF" />
+              <Text style={styles.loadingText}>Sending to server...</Text>
+            </View>
+          )}
         </View>
       </CameraView>
 
@@ -163,24 +317,44 @@ export default function BarcodeScannerScreen() {
             </Text>
             <Text style={styles.resultTime}>Scan Time: {scanTime}</Text>
             
+            {/* Status indicator */}
+            {lastScanStatus && (
+              <View style={[
+                styles.statusIndicator,
+                lastScanStatus === 'success' ? styles.statusSuccess : styles.statusError
+              ]}>
+                <Text style={styles.statusText}>
+                  {lastScanStatus === 'success' ? '✓ Sent to server' : '✗ Failed to send'}
+                </Text>
+              </View>
+            )}
+            
             <View style={styles.buttonRow}>
               <TouchableOpacity
                 style={[styles.button, styles.scanAgainButton]}
                 onPress={resetScanner}
+                disabled={isSending}
               >
-                <Text style={styles.buttonText}>Scan Again</Text>
+                {isSending ? (
+                  <ActivityIndicator color="white" size="small" />
+                ) : (
+                  <Text style={styles.buttonText}>Scan Again</Text>
+                )}
               </TouchableOpacity>
               
               <TouchableOpacity
                 style={[styles.button, styles.flipButton]}
                 onPress={toggleCameraFacing}
+                disabled={isSending}
               >
                 <Text style={styles.buttonText}>Flip Camera</Text>
               </TouchableOpacity>
             </View>
             
             <Text style={styles.noteText}>
-              Note: This data will be sent to your SQL Server API when the backend is implemented.
+              {API_CONFIG.IS_DEVELOPMENT 
+                ? 'Development Mode: Sending to ' + getApiUrl()
+                : 'Data is being sent to your SQL Server database.'}
             </Text>
           </View>
         ) : (
@@ -194,6 +368,11 @@ export default function BarcodeScannerScreen() {
                 <Text style={styles.buttonText}>Flip Camera</Text>
               </TouchableOpacity>
             </View>
+            <Text style={styles.deviceInfo}>
+              {API_CONFIG.IS_DEVELOPMENT 
+                ? `Dev Mode: ${getApiUrl().replace('http://', '')}`
+                : 'Production Mode'}
+            </Text>
           </View>
         )}
       </View>
@@ -290,6 +469,21 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     borderRadius: 20,
   },
+  loadingOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  loadingText: {
+    color: 'white',
+    marginTop: 10,
+    fontSize: 16,
+  },
   controlsContainer: {
     backgroundColor: 'white',
     padding: 20,
@@ -322,7 +516,24 @@ const styles = StyleSheet.create({
   resultTime: {
     fontSize: 14,
     color: '#666',
-    marginBottom: 20,
+    marginBottom: 10,
+  },
+  statusIndicator: {
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 15,
+    marginBottom: 15,
+  },
+  statusSuccess: {
+    backgroundColor: '#d4edda',
+  },
+  statusError: {
+    backgroundColor: '#f8d7da',
+  },
+  statusText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#333',
   },
   readyText: {
     fontSize: 20,
@@ -341,6 +552,7 @@ const styles = StyleSheet.create({
     paddingVertical: 14,
     borderRadius: 10,
     alignItems: 'center',
+    justifyContent: 'center',
   },
   scanAgainButton: {
     backgroundColor: '#34C759',
@@ -359,5 +571,12 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginTop: 20,
     fontStyle: 'italic',
+  },
+  deviceInfo: {
+    fontSize: 11,
+    color: '#666',
+    textAlign: 'center',
+    marginTop: 10,
+    fontFamily: 'monospace',
   },
 });
