@@ -1,15 +1,14 @@
 import { BarcodeScanningResult, CameraType, CameraView, useCameraPermissions } from 'expo-camera';
-import { useFocusEffect } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router'; // Added useRouter
 import * as ScreenOrientation from 'expo-screen-orientation';
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react'; // Added useRef
 import {
   ActivityIndicator,
-  Alert,
   Dimensions,
   StyleSheet,
   Text,
   TouchableOpacity,
-  View,
+  View
 } from 'react-native';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
@@ -37,14 +36,18 @@ const getApiUrl = () => {
 };
 
 export default function BarcodeScannerScreen() {
+  const router = useRouter(); // Added router
   const [permission, requestPermission] = useCameraPermissions();
   const [scanned, setScanned] = useState(false);
   const [scannedData, setScannedData] = useState<string>('');
   const [scanTime, setScanTime] = useState<string>('');
   const [facing, setFacing] = useState<CameraType>('back');
   const [isActive, setIsActive] = useState(true);
-  const [isSending, setIsSending] = useState(false); // New state for sending data
+  const [isSending, setIsSending] = useState(false);
   const [lastScanStatus, setLastScanStatus] = useState<'success' | 'error' | null>(null);
+  
+  // Ref to track if alert is showing to prevent duplicate scans
+  const alertIsShowing = useRef(false);
 
   // Lock screen orientation to portrait
   useEffect(() => {
@@ -59,6 +62,7 @@ export default function BarcodeScannerScreen() {
   useFocusEffect(
     React.useCallback(() => {
       setIsActive(true);
+      alertIsShowing.current = false;
       return () => {
         setIsActive(false);
       };
@@ -127,81 +131,59 @@ export default function BarcodeScannerScreen() {
   };
 
   const handleBarCodeScanned = async ({ type, data }: BarcodeScanningResult) => {
-    if (!scanned && !isSending) {
-      setScanned(true);
-      setScannedData(data);
-      
-      // Get current date/time
-      const now = new Date();
-      const formattedTime = now.toLocaleString('en-US', {
-        year: 'numeric',
-        month: 'short',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit',
-      });
-      const isoTime = now.toISOString(); // For database
-      
-      setScanTime(formattedTime);
-      
-      // Show initial alert
-      Alert.alert(
-        'Barcode Scanned!',
-        `Employee ID: ${data}\n\nSending to server...`,
-        [{ text: 'OK', onPress: () => {} }]
-      );
-      
-      // Send data to server
-      const result = await sendScanToServer(data, isoTime, type);
-      
-      // Show result alert with proper button typing
-      if (result.success) {
-        Alert.alert(
-          'Success!',
-          `Scan recorded successfully!\n\nEmployee: ${data}\nTime: ${formattedTime}`,
-          [
-            { 
-              text: 'Scan Again', 
-              onPress: () => resetScanner(),
-              style: 'default' as const
-            }
-          ]
-        );
-      } else {
-        Alert.alert(
-          'Upload Failed',
-          `Failed to send scan data.\n\nError: ${result.message}\n\nEmployee: ${data}\nTime: ${formattedTime}`,
-          [
-            { 
-              text: 'Scan Again', 
-              onPress: () => resetScanner(),
-              style: 'default' as const
-            },
-            {
-              text: 'Retry Send',
-              onPress: () => retrySend(data, isoTime, type),
-              style: 'cancel' as const
-            }
-          ]
-        );
-      }
+    // Prevent multiple scans while alert is showing or sending
+    if (scanned || isSending || alertIsShowing.current) {
+      return;
     }
+    
+    setScanned(true);
+    setScannedData(data);
+    
+    // Get current date/time
+    const now = new Date();
+    const formattedTime = now.toLocaleString('en-US', {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+    const isoTime = now.toISOString(); // For database
+    
+    setScanTime(formattedTime);
+    
+    // Mark that alert is showing
+    alertIsShowing.current = true;
+    
+    // Send data to server in background
+    sendScanToServer(data, isoTime, type).then(result => {
+      // Auto-dismiss the scanner and show success in UI instead of alert
+      if (result.success) {
+        // Auto reset after 2 seconds for success
+        setTimeout(() => {
+          alertIsShowing.current = false;
+          resetScanner();
+        }, 2000);
+      } else {
+        // For errors, show brief alert then auto-dismiss
+        setTimeout(() => {
+          alertIsShowing.current = false;
+          // Don't auto-reset on error, let user decide
+        }, 3000);
+      }
+    });
   };
 
   const retrySend = async (employeeId: string, scanDateTime: string, scanType: string) => {
     const result = await sendScanToServer(employeeId, scanDateTime, scanType);
     
-    Alert.alert(
-      result.success ? 'Retry Success!' : 'Retry Failed',
-      result.message,
-      [
-        { 
-          text: 'OK', 
-          onPress: () => resetScanner(),
-        }
-      ]
-    );
+    if (result.success) {
+      // Auto reset after successful retry
+      setTimeout(() => {
+        resetScanner();
+      }, 1500);
+    }
   };
 
   const resetScanner = () => {
@@ -209,10 +191,15 @@ export default function BarcodeScannerScreen() {
     setScannedData('');
     setScanTime('');
     setLastScanStatus(null);
+    alertIsShowing.current = false;
   };
 
   const toggleCameraFacing = () => {
     setFacing(current => (current === 'back' ? 'front' : 'back'));
+  };
+
+  const navigateToManualEntry = () => {
+    router.push('/manual-entry');
   };
 
   // Get computer IP for development (you need to fill this in)
@@ -221,14 +208,6 @@ export default function BarcodeScannerScreen() {
     // Run `ipconfig` in Windows CMD and look for "IPv4 Address"
     return '192.168.1.100'; // REPLACE WITH YOUR ACTUAL IP
   };
-
-  // Update DEV_API_URL with actual IP on component mount
-  useEffect(() => {
-    if (API_CONFIG.IS_DEVELOPMENT) {
-      // In a real app, you might want to make this configurable
-      // For now, you'll need to manually update the IP above
-    }
-  }, []);
 
   if (!permission) {
     return (
@@ -297,6 +276,14 @@ export default function BarcodeScannerScreen() {
             </Text>
           </View>
 
+          {/* Manual Entry Button Overlay */}
+          <TouchableOpacity
+            style={styles.manualEntryButtonOverlay}
+            onPress={navigateToManualEntry}
+          >
+            <Text style={styles.manualEntryButtonText}>Manual Entry</Text>
+          </TouchableOpacity>
+
           {/* Loading indicator when sending data */}
           {isSending && (
             <View style={styles.loadingOverlay}>
@@ -324,7 +311,7 @@ export default function BarcodeScannerScreen() {
                 lastScanStatus === 'success' ? styles.statusSuccess : styles.statusError
               ]}>
                 <Text style={styles.statusText}>
-                  {lastScanStatus === 'success' ? '✓ Sent to server' : '✗ Failed to send'}
+                  {lastScanStatus === 'success' ? '✓ Sent successfully' : '✗ Failed to send'}
                 </Text>
               </View>
             )}
@@ -342,6 +329,16 @@ export default function BarcodeScannerScreen() {
                 )}
               </TouchableOpacity>
               
+              {lastScanStatus === 'error' && (
+                <TouchableOpacity
+                  style={[styles.button, styles.retryButton]}
+                  onPress={() => retrySend(scannedData, new Date().toISOString(), 'retry')}
+                  disabled={isSending}
+                >
+                  <Text style={styles.buttonText}>Retry</Text>
+                </TouchableOpacity>
+              )}
+              
               <TouchableOpacity
                 style={[styles.button, styles.flipButton]}
                 onPress={toggleCameraFacing}
@@ -350,6 +347,13 @@ export default function BarcodeScannerScreen() {
                 <Text style={styles.buttonText}>Flip Camera</Text>
               </TouchableOpacity>
             </View>
+            
+            <TouchableOpacity
+              style={styles.manualEntryLink}
+              onPress={navigateToManualEntry}
+            >
+              <Text style={styles.manualEntryLinkText}>Or enter manually →</Text>
+            </TouchableOpacity>
             
             <Text style={styles.noteText}>
               {API_CONFIG.IS_DEVELOPMENT 
@@ -366,6 +370,13 @@ export default function BarcodeScannerScreen() {
                 onPress={toggleCameraFacing}
               >
                 <Text style={styles.buttonText}>Flip Camera</Text>
+              </TouchableOpacity>
+              
+              <TouchableOpacity
+                style={[styles.button, styles.manualEntryButton]}
+                onPress={navigateToManualEntry}
+              >
+                <Text style={styles.buttonText}>Manual Entry</Text>
               </TouchableOpacity>
             </View>
             <Text style={styles.deviceInfo}>
@@ -419,7 +430,7 @@ const styles = StyleSheet.create({
   },
   scanFrame: {
     width: SCAN_FRAME_SIZE,
-    height: SCAN_FRAME_SIZE * 0.6, // Rectangle shape for ID cards
+    height: SCAN_FRAME_SIZE * 0.6,
     borderWidth: 2,
     borderColor: 'transparent',
     position: 'relative',
@@ -468,6 +479,22 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     paddingVertical: 10,
     borderRadius: 20,
+  },
+  manualEntryButtonOverlay: {
+    position: 'absolute',
+    top: 50,
+    right: 20,
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: '#007AFF',
+  },
+  manualEntryButtonText: {
+    color: '#007AFF',
+    fontSize: 14,
+    fontWeight: '600',
   },
   loadingOverlay: {
     position: 'absolute',
@@ -546,6 +573,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: 12,
     width: '100%',
+    marginBottom: 10,
   },
   button: {
     flex: 1,
@@ -557,19 +585,35 @@ const styles = StyleSheet.create({
   scanAgainButton: {
     backgroundColor: '#34C759',
   },
+  retryButton: {
+    backgroundColor: '#FF9500',
+  },
   flipButton: {
     backgroundColor: '#007AFF',
+  },
+  manualEntryButton: {
+    backgroundColor: '#5856D6',
   },
   buttonText: {
     color: 'white',
     fontSize: 16,
     fontWeight: '600',
   },
+  manualEntryLink: {
+    marginTop: 10,
+    marginBottom: 15,
+  },
+  manualEntryLinkText: {
+    color: '#007AFF',
+    fontSize: 14,
+    fontWeight: '500',
+    textDecorationLine: 'underline',
+  },
   noteText: {
     fontSize: 12,
     color: '#999',
     textAlign: 'center',
-    marginTop: 20,
+    marginTop: 5,
     fontStyle: 'italic',
   },
   deviceInfo: {
